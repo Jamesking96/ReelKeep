@@ -1,0 +1,51 @@
+# Builds ReelKeep.exe and publishes it as a GitHub release whenever a version tag (v1.0.0, v1.2.3, ...) is pushed.
+# Release notes come from docs/release-notes/<tag>.md if that file exists, otherwise they're generated.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:        # re-run for an existing tag from the Actions tab (pick the tag as the ref)
+
+permissions:
+  contents: write           # create the release and upload the exe
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build single-file exe
+        shell: pwsh
+        run: |
+          $version = '${{ github.ref_name }}'.TrimStart('v')
+          ./build/publish.ps1 -Version $version
+
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist/ReelKeep.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  ReelKeep.exe" | Out-File -Encoding ascii dist/ReelKeep.exe.sha256
+          "SHA256: $hash"
+
+      - name: Release notes
+        id: notes
+        shell: pwsh
+        run: |
+          $file = "docs/release-notes/${{ github.ref_name }}.md"
+          if (Test-Path $file) { "path=$file" >> $env:GITHUB_OUTPUT } else { "path=" >> $env:GITHUB_OUTPUT }
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ReelKeep ${{ github.ref_name }}
+          body_path: ${{ steps.notes.outputs.path }}
+          generate_release_notes: ${{ steps.notes.outputs.path == '' }}
+          files: |
+            dist/ReelKeep.exe
+            dist/ReelKeep.exe.sha256
