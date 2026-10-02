@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReelKeep</title>
+<link rel="icon" href="icon.png">
+<script>
+  // Pick the theme before the first paint (the host sets window.__rkTheme from the saved setting)
+  (function () {
+    var p = window.__rkTheme || 'system';
+    var dark = p === 'dark' || (p !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  })();
+</script>
+<link rel="stylesheet" href="css/industry.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div id="app"></div>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

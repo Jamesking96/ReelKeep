@@ -1,0 +1,57 @@
+# ---------------------------------------------------------------------------------------------------------------
+# ReelKeep – what stays out of the repository.
+# Source, assets (fonts, icons), build scripts and docs are committed; everything below is generated, downloaded
+# at runtime, personal, or too big. The released exe is attached to GitHub Releases, never committed.
+# ---------------------------------------------------------------------------------------------------------------
+
+# Build output
+bin/
+obj/
+dist/
+publish/
+artifacts/
+TestResults/
+*.pdb
+*.nupkg
+
+# Any compiled or downloaded executables (ReelKeep.exe, yt-dlp.exe, ffmpeg.exe, ffprobe.exe, ...)
+*.exe
+*.dll
+*.zip
+*.7z
+
+# IDE / editor settings
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.swp
+*.DotSettings.user
+
+# OS clutter
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Media and library data (if a library folder is ever pointed inside the repo)
+.library/
+*.mp4
+*.mkv
+*.webm
+*.mov
+*.avi
+*.m4a
+*.mp3
+*.opus
+*.ogg
+*.flac
+*.wav
+*.part
+*.ytdl
+*.info.json
+
+# Logs and local app data
+*.log
+error.log
+settings.json

@@ -1,0 +1,121 @@
+/* App-level styles on top of the Industry design system (industry.css). Layout mostly lives inline in the
+   templates (js/app.js), mirroring the Claude Design board; this file holds hovers, states and app plumbing. */
+
+html, body, #app { height: 100%; margin: 0; overflow: hidden; }
+
+/* ── Themes ─────────────────────────────────────────────────────────────────────────────────────────
+   Light is the Industry system as designed. Dark keeps the same hues on a near-black steel ground; its
+   tonal ramps run the other way (100 = deepest tint, 900 = lightest), so every "tinted fill / dark text
+   on tint" pairing in the design keeps working unchanged. The --screen-* tokens are the video surfaces
+   (player frame, mini player, duration badges) and stay dark in both themes. */
+:root {
+  color-scheme: light;
+  --color-danger: #9b3b32;
+  --screen-bg: #1d2d3d;
+  --screen-fg: #f5f5f8;
+  --screen-line: #416180;
+  --screen-dim: #94bce3;
+  --screen-hi: #d6ebff;
+  --scrim: color-mix(in srgb, #2b2b2d 50%, transparent);
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-bg: #161719;
+  --color-surface: #1e1f22;
+  --color-text: #e3e4e6;
+  --color-accent: #7ea6cd;
+  --color-accent-2: #8ca6bf;
+  --color-divider: color-mix(in srgb, #e3e4e6 15%, transparent);
+  --color-danger: #e58a80;
+
+  --color-neutral-100: #1f2023; --color-neutral-200: #28292c; --color-neutral-300: #36373a;
+  --color-neutral-400: #4f4f52; --color-neutral-500: #6e6e71; --color-neutral-600: #8e8e91;
+  --color-neutral-700: #ababae; --color-neutral-800: #cacacd; --color-neutral-900: #e7e7ea;
+
+  --color-accent-100: #1b2733; --color-accent-200: #233548; --color-accent-300: #2e4760;
+  --color-accent-400: #45678a; --color-accent-500: #5f87ae; --color-accent-600: #94bce3;
+  --color-accent-700: #a9cdf1; --color-accent-800: #cfe5fb; --color-accent-900: #eef6ff;
+
+  --color-accent-2-100: #1d2731; --color-accent-2-200: #253444; --color-accent-2-300: #31465a;
+  --color-accent-2-400: #4a6680; --color-accent-2-500: #6886a2; --color-accent-2-600: #9ebbd8;
+  --color-accent-2-700: #b3cde6; --color-accent-2-800: #d3e4f4; --color-accent-2-900: #eef6ff;
+
+  /* Elevation on a dark ground: a hairline edge plus ambient darkness */
+  --shadow-sm: 0 0 0 1px rgba(255,255,255,.04), 0 1px 2px rgba(0,0,0,.45);
+  --shadow-md: 0 0 0 1px rgba(255,255,255,.05), 0 4px 14px rgba(0,0,0,.5);
+  --shadow-lg: 0 0 0 1px rgba(255,255,255,.06), 0 14px 36px rgba(0,0,0,.6);
+  --scrim: rgba(0,0,0,.6);
+  --screen-bg: #121c27;
+}
+.dialog-backdrop { background: var(--scrim); }
+
+/* Theme switch in the sidebar footer */
+.theme-seg { display: flex; margin-bottom: 8px; }
+.theme-seg .seg-opt { flex: 1; justify-content: center; padding: 5px 4px; font-size: 11.5px; gap: 4px; }
+body { user-select: none; -webkit-user-select: none; }
+input, textarea, pre, .selectable { user-select: text; -webkit-user-select: text; }
+a { color: var(--color-accent-700); cursor: pointer; }
+a:hover { color: var(--color-accent-800); }
+.btn { white-space: nowrap; flex: none; }
+select.input { cursor: pointer; }
+input[type=range] { accent-color: var(--color-accent); }
+input[type=checkbox] { accent-color: var(--color-accent); }
+
+/* Scrollbars in the system's hairline style */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--color-text) 18%, transparent); border: 3px solid var(--color-bg); }
+::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--color-text) 32%, transparent); }
+
+/* Sidebar navigation */
+.nav-item { display: flex; align-items: center; gap: 10px; padding: 8px; cursor: pointer; font-size: 14px; font-weight: 500; }
+.nav-item:not(.on):hover, .ch-item:not(.on):hover { background: color-mix(in srgb, var(--color-text) 6%, transparent); }
+.nav-item.on, .ch-item.on { background: var(--color-accent-100); color: var(--color-accent-800); }
+.ch-item { padding: 5px 8px; font-size: 13px; display: flex; cursor: pointer; gap: 8px; }
+.ch-item > span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Library tiles / rows */
+.tile { display: flex; flex-direction: column; gap: 7px; padding: 6px; margin: -6px; cursor: default; }
+.tile:not(.sel):hover { background: color-mix(in srgb, var(--color-text) 4%, transparent); }
+.tile.sel, .lrow.sel { background: var(--color-accent-100); }
+.lrow:not(.sel):hover, .qrow:hover, .crow:hover { background: color-mix(in srgb, var(--color-text) 4%, transparent); }
+.thumb { aspect-ratio: 16/9; background: var(--color-neutral-200);
+  background-image: repeating-linear-gradient(135deg, transparent 0 10px, color-mix(in srgb, var(--color-text) 5%, transparent) 10px 11px); display: grid; place-items: center; }
+.thumb > img, .thumb-sm > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb-sm { position: relative; width: 60px; height: 34px; background: var(--color-neutral-200); border: 1px solid var(--color-divider); overflow: hidden; }
+.thumb .placeholder { font: 10px ui-monospace, Menlo, monospace; letter-spacing: .1em; }
+.tile .play-btn { opacity: 0; transition: opacity .12s; }
+.tile:hover .play-btn, .tile.sel .play-btn { opacity: 1; }
+
+/* Context menu */
+.menu-item { display: flex; padding: 7px 14px; cursor: pointer; }
+.menu-item:hover { background: var(--color-accent-100); color: var(--color-accent-800); }
+.menu-item.disabled { opacity: .45; pointer-events: none; }
+
+/* Inspector tabs */
+.tab { padding: 4px 6px 7px; cursor: pointer; color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+.tab:hover { color: var(--color-text); }
+.tab.on { color: var(--color-text); font-weight: 500; box-shadow: inset 0 -2px 0 var(--color-accent); }
+
+/* The one <video> element lives in this layer and is positioned over the player frame or the mini-player
+   thumbnail (so playback continues while you browse). */
+.video-layer { position: absolute; z-index: 1; background: #000; display: none; pointer-events: none; }
+.video-layer video { width: 100%; height: 100%; object-fit: contain; display: block; background: var(--screen-bg); }
+.video-layer.audio video { object-fit: cover; }
+.over-video { position: relative; z-index: 2; }
+
+/* Indeterminate progress (fetching info) */
+.indeterminate { height: 2px; background: var(--color-neutral-300); overflow: hidden; position: relative; }
+.indeterminate > div { position: absolute; height: 2px; width: 40%; background: var(--color-accent); animation: slide 1.1s ease-in-out infinite; }
+@keyframes slide { from { left: -40%; } to { left: 100%; } }
+
+.bar { height: 2px; background: var(--color-neutral-300); }
+.bar > div { height: 2px; background: var(--color-accent); transition: width .2s; }
+
+.pill-time { font-variant-numeric: tabular-nums; }
+.dialog-backdrop { z-index: 40; }
+.dialog { max-height: calc(100vh - 48px); }   /* never taller than the window */
+/* In a dialog with a long list, only the list scrolls; the title, options and buttons stay in view */
+.dialog > :not(.dialog-scroll) { flex-shrink: 0; }
+.dialog-scroll { flex: 0 1 auto; min-height: 90px; overflow: auto; }
+.err { color: var(--color-danger); }
