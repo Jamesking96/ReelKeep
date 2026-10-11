@@ -171,6 +171,9 @@ public sealed class LibraryEntry
     public int? VideoHeight { get; set; }
     public double? VideoFps { get; set; }
     public List<EntryFile> Files { get; set; } = new();
+    /// <summary>Subfolder of the library the media files live in ("Music\Chill"); empty = the library folder itself.
+    /// The item's records (.library) always stay in the library folder.</summary>
+    public string Folder { get; set; } = "";
     public DateTime DownloadedAt { get; set; } = DateTime.Now;
     public List<SponsorSegment> SponsorSegments { get; set; } = new();
 
@@ -182,6 +185,10 @@ public sealed class LibraryEntry
     [JsonIgnore] public string Root { get; set; } = "";
 
     [JsonIgnore] public string SidecarDir => Path.Combine(Root, SidecarFolderName);
+    /// <summary>The folder the media files are in.</summary>
+    [JsonIgnore] public string MediaDir => string.IsNullOrEmpty(Folder) ? Root : Path.Combine(Root, Folder);
+    /// <summary>A media file's path relative to the library folder (for the media host URL).</summary>
+    public string RelativePath(EntryFile f) => string.IsNullOrEmpty(Folder) ? f.FileName : Path.Combine(Folder, f.FileName);
     [JsonIgnore] public string MetaFile => Path.Combine(SidecarDir, Metadata.Id + ".meta.json");
     [JsonIgnore] public string InfoFile => Path.Combine(SidecarDir, Metadata.Id + ".info.json");
     [JsonIgnore] public string ThumbnailPath => Path.Combine(SidecarDir, Metadata.Id + ".jpg");
@@ -189,7 +196,7 @@ public sealed class LibraryEntry
     [JsonIgnore] public EntryFile? Main => Files.FirstOrDefault(f => f.Role == FileRole.Main);
     [JsonIgnore] public EntryFile? SeparateAudio => Files.FirstOrDefault(f => f.Role == FileRole.SeparateAudio);
 
-    public string FullPath(EntryFile f) => Path.Combine(Root, f.FileName);
+    public string FullPath(EntryFile f) => Path.Combine(MediaDir, f.FileName);
     public string? MainPath => Main is { } m ? FullPath(m) : null;
     public string? SeparateAudioPath => SeparateAudio is { } a ? FullPath(a) : null;
 
@@ -263,12 +270,110 @@ public static class LibraryOps
     }
 
     /// <summary>Expand a naming pattern: {title} {channel} {id} {date} {year}.</summary>
-    public static string ApplyPattern(string pattern, VideoMetadata m) => Sanitize(pattern
+    public static string ApplyPattern(string pattern, VideoMetadata m) => Sanitize(ExpandTokens(pattern, m));
+
+    private static string ExpandTokens(string pattern, VideoMetadata m) => pattern
         .Replace("{title}", m.Title, StringComparison.OrdinalIgnoreCase)
         .Replace("{channel}", m.Channel ?? m.Uploader ?? "", StringComparison.OrdinalIgnoreCase)
         .Replace("{id}", m.Id, StringComparison.OrdinalIgnoreCase)
         .Replace("{date}", m.UploadDate?.ToString("yyyy-MM-dd") ?? "", StringComparison.OrdinalIgnoreCase)
-        .Replace("{year}", m.UploadDate?.Year.ToString() ?? "", StringComparison.OrdinalIgnoreCase));
+        .Replace("{year}", m.UploadDate?.Year.ToString() ?? "", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Clean up a subfolder path typed by the user: "Music / Chill" -> "Music\Chill". Segments are made safe as folder
+    /// names, empty ones and "." / ".." are dropped, and with <paramref name="meta"/> the same tokens as file names
+    /// ({channel}, {year}, ...) are filled in. Returns "" for the library folder itself.
+    /// </summary>
+    public static string NormalizeFolder(string? input, VideoMetadata? meta = null)
+    {
+        var parts = new List<string>();
+        foreach (var raw in (input ?? "").Split('/', '\\'))
+        {
+            var seg = (meta != null ? ExpandTokens(raw, meta) : raw).Trim();
+            if (seg.Length == 0 || seg == "." || seg == "..") continue;
+            seg = Sanitize(seg);
+            if (seg.Equals(LibraryEntry.SidecarFolderName, StringComparison.OrdinalIgnoreCase)) seg = "_" + seg.TrimStart('.');
+            parts.Add(seg);
+            if (parts.Count == 8) break;
+        }
+        return string.Join(Path.DirectorySeparatorChar, parts);
+    }
+
+    /// <summary>
+    /// Move all of an entry's media files into another subfolder of the library. If the names are taken there, the
+    /// entry gets "Name (2)" and so on. All-or-nothing: on failure the files already moved are put back.
+    /// </summary>
+    public static void MoveTo(LibraryEntry e, string folder)
+    {
+        var toDir = string.IsNullOrEmpty(folder) ? e.Root : Path.Combine(e.Root, folder);
+        if (string.Equals(Path.GetFullPath(toDir).TrimEnd('\\'), Path.GetFullPath(e.MediaDir).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+        {
+            e.Folder = folder;
+            e.Save();
+            return;
+        }
+        Directory.CreateDirectory(toDir);
+
+        // A name that's free in the destination for every file that follows the entry's name
+        var name = e.Name;
+        bool Taken(string n) => e.Files.Any(f => f.FixedName == null && File.Exists(Path.Combine(toDir, TargetFileName(e, f, n))));
+        for (var i = 2; Taken(name); i++) name = $"{e.Name} ({i})";
+
+        var plan = new List<(EntryFile File, string From, string To, string? Fixed)>();
+        var claimed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var f in e.Files)
+        {
+            string to; string? fixedName = f.FixedName;
+            if (f.FixedName == null) to = TargetFileName(e, f, name);
+            else
+            {
+                var ext = Path.GetExtension(f.FileName);
+                to = UniqueFileName(toDir, f.FixedName, ext, claimed);
+                fixedName = Path.GetFileNameWithoutExtension(to);
+            }
+            claimed.Add(to);
+            plan.Add((f, e.FullPath(f), Path.Combine(toDir, to), fixedName));
+        }
+
+        var done = new List<(string From, string To)>();
+        try
+        {
+            foreach (var (_, from, to, _) in plan)
+            {
+                if (!File.Exists(from)) continue;
+                File.Move(from, to);
+                done.Add((from, to));
+            }
+        }
+        catch
+        {
+            for (var i = done.Count - 1; i >= 0; i--) try { File.Move(done[i].To, done[i].From); } catch { /* best effort */ }
+            throw;
+        }
+
+        var fromDir = e.MediaDir;
+        foreach (var (file, _, to, fixedName) in plan) { file.FileName = Path.GetFileName(to); file.FixedName = fixedName; }
+        e.Name = name;
+        e.Folder = folder;
+        e.Save();
+        RemoveEmptyFolders(fromDir, e.Root);
+    }
+
+    /// <summary>Delete <paramref name="dir"/> and its parents (up to, not including, the library folder) while empty.</summary>
+    public static void RemoveEmptyFolders(string dir, string root)
+    {
+        try
+        {
+            var r = Path.GetFullPath(root).TrimEnd('\\');
+            var d = Path.GetFullPath(dir).TrimEnd('\\');
+            while (d.Length > r.Length && d.StartsWith(r, StringComparison.OrdinalIgnoreCase) && Directory.Exists(d) && !Directory.EnumerateFileSystemEntries(d).Any())
+            {
+                Directory.Delete(d);
+                d = Path.GetDirectoryName(d)!;
+            }
+        }
+        catch { /* leave it */ }
+    }
 
     public static string TargetFileName(LibraryEntry e, EntryFile f, string? newEntryName = null, string? ext = null) =>
         (f.FixedName ?? (newEntryName ?? e.Name) + f.Suffix) + (ext ?? Path.GetExtension(f.FileName));
@@ -304,8 +409,9 @@ public static class LibraryOps
         var ext = Path.GetExtension(producedPath);
         var desired = TargetFileName(e, f, ext: ext);
         var baseName = Path.GetFileNameWithoutExtension(desired);
-        var name = UniqueFileName(e.Root, baseName, ext);
-        var target = Path.Combine(e.Root, name);
+        Directory.CreateDirectory(e.MediaDir);
+        var name = UniqueFileName(e.MediaDir, baseName, ext);
+        var target = Path.Combine(e.MediaDir, name);
         if (!string.Equals(Path.GetFullPath(producedPath), Path.GetFullPath(target), StringComparison.OrdinalIgnoreCase))
             File.Move(producedPath, target);
         // If we had to add " (2)", remember the real base name so renames keep it unique
@@ -329,7 +435,7 @@ public static class LibraryOps
         var ours = new HashSet<string>(e.Files.Select(e.FullPath).Select(Path.GetFullPath), StringComparer.OrdinalIgnoreCase);
         foreach (var (_, _, to) in plan)
         {
-            var full = Path.GetFullPath(Path.Combine(e.Root, to));
+            var full = Path.GetFullPath(Path.Combine(e.MediaDir, to));
             if (File.Exists(full) && !ours.Contains(full))
                 throw new IOException($"A file called \"{to}\" already exists in the library folder.");
         }
@@ -339,7 +445,7 @@ public static class LibraryOps
         for (var i = 0; i < plan.Count; i++) File.Move(plan[i].From, temps[i].Temp);
         foreach (var (file, temp, to) in temps)
         {
-            File.Move(temp, Path.Combine(e.Root, to));
+            File.Move(temp, Path.Combine(e.MediaDir, to));
             file.FileName = to;
         }
         e.Name = newName;
@@ -351,7 +457,7 @@ public static class LibraryOps
     {
         newBaseName = Sanitize(newBaseName);
         var to = newBaseName + Path.GetExtension(f.FileName);
-        var toFull = Path.Combine(e.Root, to);
+        var toFull = Path.Combine(e.MediaDir, to);
         var fromFull = e.FullPath(f);
         if (!string.Equals(Path.GetFullPath(fromFull), Path.GetFullPath(toFull), StringComparison.OrdinalIgnoreCase) && File.Exists(toFull))
             throw new IOException($"A file called \"{to}\" already exists.");
@@ -415,6 +521,12 @@ public sealed class AppSettings
     /// <summary>Prefix playlist downloads with their position ("01 - Title").</summary>
     public bool NumberPlaylistFiles { get; set; } = true;
     public bool KeepExtrasOnRedownload { get; set; } = true;
+    /// <summary>Sign-in for restricted videos: "" (off), a browser ("firefox", "chrome", ...) or "file".</summary>
+    public string CookieSource { get; set; } = "";
+    /// <summary>A cookies.txt (Netscape format) file, used when <see cref="CookieSource"/> is "file".</summary>
+    public string? CookieFile { get; set; }
+    /// <summary>Subfolder new downloads go into (may use {channel}, {year}, ... tokens); empty = the library folder.</summary>
+    public string DefaultFolder { get; set; } = "";
     /// <summary>How many downloads run at the same time (1–6).</summary>
     public int ParallelDownloads { get; set; } = 2;
 

@@ -226,10 +226,17 @@ public sealed class YtDlpService
         return new DownloadResult(video ?? files[0], audio);
     }
 
+    /// <summary>
+    /// Sign-in for videos that need an account (e.g. age-restricted ones): either
+    /// <c>--cookies-from-browser firefox</c> or <c>--cookies C:\path\cookies.txt</c>. Empty = not signed in.
+    /// </summary>
+    public IReadOnlyList<string> AuthArgs { get; set; } = Array.Empty<string>();
+
     private IEnumerable<string> CommonArgs()
     {
         if (JsRuntime == "node") { yield return "--js-runtimes"; yield return "node"; }
         yield return "--no-warnings";
+        foreach (var a in AuthArgs) yield return a;
     }
 
     /// <summary>Run yt-dlp, streaming stdout lines to <paramref name="onLine"/>. Kills the process tree on cancel.</summary>

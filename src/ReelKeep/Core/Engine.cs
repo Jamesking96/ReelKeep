@@ -46,6 +46,8 @@ public sealed class QueueJob
     public string? NameOverride { get; init; }
     public required DownloadOptions Options { get; init; }
     public bool PlayAfter { get; init; }
+    /// <summary>Library subfolder to save into, as typed (may contain {channel} etc.); empty = library folder.</summary>
+    public string Folder { get; init; } = "";
     /// <summary>Set for a re-download: the item to download again and replace.</summary>
     public LibraryEntry? Target { get; init; }
     public bool KeepExtras { get; init; } = true;
@@ -53,6 +55,10 @@ public sealed class QueueJob
     public JobState State { get; set; }
     public double Percent { get; set; }
     public string Detail { get; set; } = "";
+    /// <summary>The full error text of a failed job (Detail holds a one-line summary).</summary>
+    public string? Error { get; set; }
+    /// <summary>The site wants a signed-in account for this video (age-restricted and similar).</summary>
+    public bool NeedsSignIn { get; set; }
     public string? ResultId { get; set; }
     internal CancellationTokenSource? Cts { get; set; }
 }
@@ -114,6 +120,7 @@ public sealed class Engine
     // =========================================================================================
     public async Task InitAsync(IProgress<string> status)
     {
+        ApplySignIn();
         LoadLibrary();
         Changed?.Invoke();
         try
@@ -297,7 +304,7 @@ public sealed class Engine
     public void RetryJobs(int? id = null)
     {
         foreach (var j in Queue.Where(j => j.State == JobState.Failed && (id == null || j.Id == id)))
-        { j.State = JobState.Waiting; j.Detail = ""; j.Percent = 0; }
+        { j.State = JobState.Waiting; j.Detail = ""; j.Percent = 0; j.Error = null; j.NeedsSignIn = false; }
         Changed?.Invoke();
         Pump();
     }
@@ -388,7 +395,8 @@ public sealed class Engine
         catch (Exception ex)
         {
             job.State = JobState.Failed;
-            job.Detail = FirstUsefulLine(ex.Message);
+            job.Error = ex.Message.Trim();
+            (job.Detail, job.NeedsSignIn) = DescribeFailure(ex.Message, Settings.CookieSource);
         }
         finally
         {
@@ -407,6 +415,66 @@ public sealed class Engine
         if (!_busy.Contains(videoId)) return;
         ReportJob(job, 0, "Waiting – this video is already being worked on…");
         while (_busy.Contains(videoId)) await Task.Delay(400, ct);
+    }
+
+    /// <summary>
+    /// A short, readable reason for a failed download, and whether signing in would help. The full text is kept in
+    /// <see cref="QueueJob.Error"/> for copying.
+    /// </summary>
+    public static (string Detail, bool NeedsSignIn) DescribeFailure(string message, string cookieSource)
+    {
+        bool Has(string s) => message.Contains(s, StringComparison.OrdinalIgnoreCase);
+        var signedIn = !string.IsNullOrEmpty(cookieSource);
+
+        // Problems reading the browser's cookies (the sign-in itself didn't work)
+        if (Has("cookie database") && (Has("could not copy") || Has("locked") || Has("permission")))
+            return ("Couldn't read the browser's sign-in – close that browser completely, then retry", true);
+        if (Has("DPAPI") || (Has("decrypt") && Has("cookie")))
+            return ("This browser's sign-in can't be read – use Firefox or a cookies file (Sign-in in the sidebar)", true);
+        if (Has("could not find") && Has("cookies database"))
+            return ("That browser isn't installed or has no profile – pick another in Sign-in", true);
+        if (Has("does not look like a Netscape format cookies file") || (Has("cookies file") && Has("not found")))
+            return ("The cookies file couldn't be used – export it again (Netscape / cookies.txt format)", true);
+
+        // The site wants an account
+        if (Has("confirm your age") || Has("age-restricted") || Has("inappropriate for some users") || Has("age verification"))
+            return (signedIn ? "Age-restricted – the signed-in account wasn't accepted (is the browser signed in?)"
+                             : "Age-restricted – set up Sign-in, then retry", true);
+        if (Has("Sign in to confirm") || Has("--cookies-from-browser") || Has("--cookies for the authentication") || Has("members-only") || Has("join this channel"))
+            return (signedIn ? "Needs an account that has access – check Sign-in, then retry"
+                             : "Needs sign-in – set up Sign-in, then retry", true);
+
+        return (FirstUsefulLine(message), false);
+    }
+
+    /// <summary>Apply the sign-in setting to yt-dlp. Source: "" (off), a browser name, or "file".</summary>
+    public void SetSignIn(string source, string? cookieFile = null)
+    {
+        source = (source ?? "").Trim().ToLowerInvariant();
+        if (source != "" && source != "file" && !SignInBrowsers.Contains(source))
+            throw new InvalidOperationException("Unknown sign-in option: " + source);
+        if (cookieFile != null) Settings.CookieFile = cookieFile;
+        if (source == "file" && (string.IsNullOrEmpty(Settings.CookieFile) || !File.Exists(Settings.CookieFile)))
+            throw new InvalidOperationException("Choose a cookies.txt file first.");
+        Settings.CookieSource = source;
+        Settings.Save();
+        ApplySignIn();
+        Changed?.Invoke();
+    }
+
+    public static readonly string[] SignInBrowsers = { "firefox", "chrome", "edge", "brave", "opera", "vivaldi", "chromium" };
+
+    private void ApplySignIn()
+    {
+        var s = Settings.CookieSource ?? "";
+        YtDlp.AuthArgs = s switch
+        {
+            "" => Array.Empty<string>(),
+            "file" when File.Exists(Settings.CookieFile) => new[] { "--cookies", Settings.CookieFile! },
+            "file" => Array.Empty<string>(),
+            _ => new[] { "--cookies-from-browser", s },
+        };
+        _infoCache.Clear();   // anything read without (or with other) sign-in may differ now
     }
 
     private static string FirstUsefulLine(string message) =>
@@ -478,7 +546,7 @@ public sealed class Engine
     }
 
     /// <summary>Download one video into the library under <paramref name="name"/>.</summary>
-    private async Task<LibraryEntry> DownloadNewAsync(QueueJob job, VideoMetadata meta, string raw, string name, CancellationToken ct)
+    private async Task<LibraryEntry> DownloadNewAsync(QueueJob job, VideoMetadata meta, string raw, string name, CancellationToken ct, string? folder = null)
     {
         var o = job.Options;
         var root = Settings.LibraryFolder;
@@ -486,6 +554,7 @@ public sealed class Engine
         var entry = new LibraryEntry
         {
             Metadata = meta, Name = name, Root = root, IsAudioOnly = o.Mode == SaveAs.Audio, DownloadMaxHeight = o.MaxHeight,
+            Folder = folder ?? LibraryOps.NormalizeFolder(job.Folder, meta),
         };
         var tempBase = meta.Id + ".download";
 
@@ -529,8 +598,10 @@ public sealed class Engine
         {
             // Leave nothing half-made behind
             foreach (var f in entry.Files) LibraryOps.TryDelete(entry.FullPath(f));
-            foreach (var pattern in new[] { meta.Id + ".download*", meta.Id + ".converting*", meta.Id + ".thumbnail.jpg" })
-                foreach (var f in Directory.EnumerateFiles(root, pattern)) LibraryOps.TryDelete(f);
+            foreach (var dir in new[] { root, entry.MediaDir }.Distinct().Where(Directory.Exists))
+                foreach (var pattern in new[] { meta.Id + ".download*", meta.Id + ".converting*", meta.Id + ".thumbnail.jpg" })
+                    foreach (var f in Directory.EnumerateFiles(dir, pattern)) LibraryOps.TryDelete(f);
+            LibraryOps.RemoveEmptyFolders(entry.MediaDir, root);
             throw;
         }
     }
@@ -581,13 +652,14 @@ public sealed class Engine
             LibraryEntry fresh;
             try
             {
-                fresh = await DownloadNewAsync(job, meta, raw, tempName, ct);
+                fresh = await DownloadNewAsync(job, meta, raw, tempName, ct, old.Folder);
             }
             catch
             {
                 try { old.Save(); } catch { /* put the old record back */ }
                 await Task.Delay(300, CancellationToken.None);
-                foreach (var f in Directory.EnumerateFiles(old.Root, tempName + "*")) LibraryOps.TryDelete(f);
+                if (Directory.Exists(old.MediaDir))
+                    foreach (var f in Directory.EnumerateFiles(old.MediaDir, tempName + "*")) LibraryOps.TryDelete(f);
                 throw;
             }
 
@@ -666,7 +738,8 @@ public sealed class Engine
 
     private async Task ExportAudioCoreAsync(LibraryEntry entry, AudioFormat format, IProgress<double> progress, CancellationToken ct, bool save = true)
     {
-        var produced = Path.Combine(entry.Root, entry.Metadata.Id + ".converting" + AudioFormats.Extension(format));
+        Directory.CreateDirectory(entry.MediaDir);
+        var produced = Path.Combine(entry.MediaDir, entry.Metadata.Id + ".converting" + AudioFormats.Extension(format));
         await Ffmpeg.ExportAudioAsync(entry.MainPath!, entry.SeparateAudioPath, produced, format, null, null, TagsFor(entry),
             entry.ThumbnailPath, progress, ct);
         LibraryOps.AddFile(entry, produced, new EntryFile { Role = FileRole.AudioExport, Format = format.ToString() });
@@ -704,7 +777,7 @@ public sealed class Engine
             var src = entry.MainPath!;
             var sep = entry.SeparateAudioPath;
             var ext = audio ? AudioFormats.Extension(format) : ".mp4";
-            var produced = Path.Combine(entry.Root, entry.Metadata.Id + ".clipping" + ext);
+            var produced = Path.Combine(entry.MediaDir, entry.Metadata.Id + ".clipping" + ext);
             var progress = new Progress<double>(p => TaskProgress?.Invoke("Cutting clip", p));
             if (audio)
                 await Ffmpeg.ExportAudioAsync(src, sep, produced, format, start, end,
@@ -746,6 +819,55 @@ public sealed class Engine
         Changed?.Invoke();
     }
 
+    /// <summary>Move items' media files into a subfolder of the library ("" = the library folder itself). The folder
+    /// may use the naming tokens ({channel}, {year}, ...), filled in for each item.</summary>
+    public async Task<int> MoveEntriesAsync(IReadOnlyList<string> ids, string folder)
+    {
+        var moved = 0;
+        foreach (var id in ids)
+        {
+            if (Library.FirstOrDefault(e => e.Metadata.Id == id) is not { } e) continue;
+            var target = LibraryOps.NormalizeFolder(folder, e.Metadata);   // {channel}, {year}… per item
+            if (string.Equals(e.Folder, target, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!_busy.Add(id)) { Toast?.Invoke($"\"{e.Name}\" is busy – skipped"); continue; }
+            try
+            {
+                if (ReleaseMediaAsync != null) await ReleaseMediaAsync(id);
+                await RetryIo(() => LibraryOps.MoveTo(e, target));
+                moved++;
+            }
+            catch (Exception ex) { Toast?.Invoke($"Couldn't move \"{e.Name}\": {ex.Message}"); }
+            finally { _busy.Remove(id); }
+        }
+        Changed?.Invoke();
+        Pump();
+        return moved;
+    }
+
+    /// <summary>Subfolders to offer when choosing where things go: the ones items are in (and their parents) plus
+    /// folders that exist in the library folder (two levels deep), sorted.</summary>
+    public List<string> Folders()
+    {
+        var set = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var e in Library)
+            for (var f = e.Folder; !string.IsNullOrEmpty(f); f = Path.GetDirectoryName(f) ?? "") set.Add(f);
+        try
+        {
+            var root = Settings.LibraryFolder;
+            if (Directory.Exists(root))
+                foreach (var d in Directory.EnumerateDirectories(root))
+                {
+                    var name = Path.GetFileName(d);
+                    if (name.StartsWith('.') || (File.GetAttributes(d) & FileAttributes.Hidden) != 0) continue;
+                    set.Add(name);
+                    foreach (var d2 in Directory.EnumerateDirectories(d))
+                        if (!Path.GetFileName(d2).StartsWith('.')) set.Add(Path.Combine(name, Path.GetFileName(d2)));
+                }
+        }
+        catch { /* unreadable folder – just offer what we know */ }
+        return set.ToList();
+    }
+
     /// <summary>Move items (every file, plus the app's records) to the Recycle Bin.</summary>
     public async Task<int> DeleteAsync(IReadOnlyList<string> ids)
     {
@@ -759,6 +881,7 @@ public sealed class Engine
             LibraryOps.TryDelete(e.InfoFile);
             LibraryOps.TryDelete(e.ThumbnailPath);
             LibraryOps.TryDelete(e.MetaFile);
+            LibraryOps.RemoveEmptyFolders(e.MediaDir, e.Root);
             Library.Remove(e);
             NewIds.Remove(id);
             foreach (var q in Queue.Where(q => q.Target == e && q.State == JobState.Waiting))

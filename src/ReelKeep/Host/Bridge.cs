@@ -162,6 +162,7 @@ public sealed class Bridge
             {
                 var options = OptionsFrom(a);
                 var playAfter = B(a, "playAfter");
+                var folder = SN(a, "folder") ?? "";
                 var jobs = new List<QueueJob>();
                 foreach (var n in (a["items"] as JsonArray) ?? new JsonArray())
                 {
@@ -172,6 +173,7 @@ public sealed class Bridge
                     {
                         Url = url, VideoId = SN(it, "id") ?? YtDlpService.TryGetVideoId(url), Title = SN(it, "title") ?? url,
                         NamePrefix = SN(it, "prefix"), NameOverride = SN(it, "name"), Options = options, PlayAfter = playAfter,
+                        Folder = SN(it, "folder") ?? folder,
                     });
                 }
                 var before = _engine.Queue.Count;
@@ -188,6 +190,8 @@ public sealed class Bridge
             case "rename": await _engine.RenameEntryAsync(S(a, "id"), S(a, "name")); return null;
             case "renameFile": await _engine.RenameFileAsync(S(a, "id"), S(a, "file"), S(a, "name")); return null;
             case "delete": return await _engine.DeleteAsync(L(a, "ids"));
+            case "moveEntries": return await _engine.MoveEntriesAsync(L(a, "ids"), S(a, "folder"));
+            case "previewFolder": return LibraryOps.NormalizeFolder(S(a, "folder"));
             case "saveAudio": return await _engine.SaveAudioAsync(L(a, "ids"), AudioFormats.Parse(SN(a, "fmt") ?? _engine.Settings.AudioFormat));
             case "redownload":
             {
@@ -207,9 +211,9 @@ public sealed class Bridge
             case "showInFolder":
             {
                 var e = _engine.Get(S(a, "id"));
-                var file = SN(a, "file") is { } fn ? Path.Combine(e.Root, fn) : e.MainPath;
+                var file = SN(a, "file") is { } fn ? Path.Combine(e.MediaDir, fn) : e.MainPath;
                 if (file != null && File.Exists(file)) Process.Start("explorer.exe", $"/select,\"{file}\"");
-                else Process.Start("explorer.exe", $"\"{e.Root}\"");
+                else Process.Start("explorer.exe", $"\"{e.MediaDir}\"");
                 return null;
             }
             case "openLibraryFolder":
@@ -241,6 +245,23 @@ public sealed class Bridge
             case "installFfmpeg": await _engine.InstallFfmpegAsync(); return null;
             case "settings": ApplySettings(a); return null;
 
+            // ---- sign-in for restricted videos ----
+            case "signIn": _engine.SetSignIn(S(a, "source")); return null;
+            case "pickCookieFile":
+            {
+                using var dlg = new OpenFileDialog
+                {
+                    Title = "Choose a cookies.txt file (Netscape format)",
+                    Filter = "Cookies file (*.txt)|*.txt|All files (*.*)|*.*",
+                    CheckFileExists = true,
+                };
+                var current = _engine.Settings.CookieFile;
+                if (!string.IsNullOrEmpty(current) && File.Exists(current)) dlg.InitialDirectory = Path.GetDirectoryName(current);
+                if (dlg.ShowDialog(_owner) != DialogResult.OK) return null;
+                _engine.SetSignIn("file", dlg.FileName);
+                return dlg.FileName;
+            }
+
             default:
                 throw new InvalidOperationException("Unknown command: " + cmd);
         }
@@ -256,6 +277,7 @@ public sealed class Bridge
         if (SN(a, "viewMode") is { } vm) s.ViewMode = vm;
         if (SN(a, "sort") is { } so) s.Sort = so;
         if (SN(a, "clipKind") is { } ck) s.ClipKind = ck;
+        if (SN(a, "folder") is { } df) s.DefaultFolder = df.Trim();
         if (SN(a, "theme") is { } th && th is "system" or "light" or "dark")
         {
             s.Theme = th;
@@ -287,6 +309,7 @@ public sealed class Bridge
             library = _engine.Library.Select(EntryDto).ToList(),
             queue = _engine.Queue.Select(JobDto).ToList(),
             queuePaused = _engine.QueuePaused,
+            folders = _engine.Folders(),
             tools = new
             {
                 ready = _engine.ToolsReady, error = _engine.ToolsError, ytdlp = _engine.YtDlp.Version,
@@ -299,6 +322,8 @@ public sealed class Bridge
                 numberPlaylist = s.NumberPlaylistFiles, keepExtras = s.KeepExtrasOnRedownload, autoSkip = s.AutoSkipSponsors,
                 volume = s.Volume, viewMode = s.ViewMode, sort = s.Sort, clipKind = s.ClipKind, theme = s.Theme,
                 parallel = _engine.MaxParallel, parallelMax = Engine.MaxParallelLimit,
+                cookieSource = s.CookieSource, cookieFile = s.CookieFile, signInBrowsers = Engine.SignInBrowsers,
+                folder = s.DefaultFolder,
             },
         };
     }
@@ -317,6 +342,8 @@ public sealed class Bridge
             JobState.Working => "dl", JobState.Done => "done", JobState.Skipped => "skip", JobState.Failed => "fail", _ => "wait",
         },
         pct = Math.Round(j.Percent, 1), detail = j.Detail, resultId = j.ResultId, redl = j.Target != null,
+        url = j.Url, error = j.Error, signIn = j.NeedsSignIn,
+        folder = j.Target != null ? j.Target.Folder : j.Folder,
     };
 
     private object EntryDto(LibraryEntry e)
@@ -329,7 +356,7 @@ public sealed class Bridge
             try { size += new FileInfo(e.FullPath(f)).Length; } catch { /* gone */ }
 
         var thumbFile = e.Files.FirstOrDefault(f => f.Role == FileRole.Thumbnail);
-        var thumb = thumbFile != null ? MediaUrl(e, thumbFile.FileName)
+        var thumb = thumbFile != null ? MediaUrl(e, e.RelativePath(thumbFile))
             : File.Exists(e.ThumbnailPath) ? MediaUrl(e, LibraryEntry.SidecarFolderName + "/" + Path.GetFileName(e.ThumbnailPath)) : null;
 
         string quality;
@@ -344,8 +371,9 @@ public sealed class Bridge
             audio = e.IsAudioOnly || hasExport,
             saved = e.DownloadedAt.ToString("yyyy-MM-dd"), savedTs = new DateTimeOffset(e.DownloadedAt).ToUnixTimeMilliseconds(),
             isNew = _engine.NewIds.Contains(m.Id),
-            thumb, src = e.MainPath is { } mp && File.Exists(mp) ? MediaUrl(e, e.Main!.FileName) : null,
-            audioSrc = e.SeparateAudio is { } sa ? MediaUrl(e, sa.FileName) : null,
+            thumb, src = e.MainPath is { } mp && File.Exists(mp) ? MediaUrl(e, e.RelativePath(e.Main!)) : null,
+            audioSrc = e.SeparateAudio is { } sa ? MediaUrl(e, e.RelativePath(sa)) : null,
+            folder = e.Folder,
             url = m.WebpageUrl, quality,
             audioLabel = e.IsAudioOnly ? (e.Main?.Format ?? "Audio") : hasExport ? $"{exportFmt} file" : "In video",
             size, width = e.VideoWidth, height = e.VideoHeight,
@@ -374,7 +402,7 @@ public sealed class Bridge
                 _ => "",
             },
             clipS = f.ClipStart, clipE = f.ClipEnd, renamable = f.Role is FileRole.AudioExport or FileRole.Clip,
-            src = MediaUrl(e, f.FileName), created = new DateTimeOffset(f.CreatedAt).ToUnixTimeMilliseconds(),
+            src = MediaUrl(e, e.RelativePath(f)), created = new DateTimeOffset(f.CreatedAt).ToUnixTimeMilliseconds(),
         };
     }
 

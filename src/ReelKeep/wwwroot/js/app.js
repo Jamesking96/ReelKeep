@@ -23,6 +23,9 @@ const SORTS = {
 /** Keys of yt-dlp's info JSON that are too big to be useful to read. */
 const BULKY_JSON = ['formats', 'requested_formats', 'thumbnails', 'automatic_captions', 'subtitles', 'heatmap', 'requested_downloads', 'http_headers'];
 
+/** Errors that signing in (Sign-in in the sidebar) can fix – age-restricted videos and the like. */
+const SIGN_IN_ERR = /confirm your age|age-restricted|inappropriate for some users|sign in to confirm|--cookies|members-only|join this channel|cookie database|cookies database|DPAPI/i;
+
 class App extends Component {
   state = {
     data: { library: [], queue: [], queuePaused: false, tools: {}, settings: {} }, loaded: false,
@@ -37,6 +40,7 @@ class App extends Component {
     multiText: '', pl: null, plNum: true, pendingPlaylists: [], alert: null,
     toast: null, toastVideo: false, task: null, skippedSetup: false,
     theme: window.__rkTheme || 'system', parallel: 2,
+    folder: '', batchFolder: '', plFolder: '', moveIds: [], moveVal: '', folderFilter: null,
   };
 
   // =========================================================================================
@@ -77,7 +81,7 @@ class App extends Component {
     if (first) Object.assign(up, {
       mode: s.viewMode || 'grid', sort: s.sort || 'newest', autoSkip: s.autoSkip !== false, vol: s.volume ?? 80,
       saveAs: s.saveAs || 'va', quality: s.quality || 'Best', audioFmt: s.audioFmt || 'M4A', pattern: s.pattern || '{title}',
-      theme: ['light', 'dark'].includes(s.theme) ? s.theme : 'system', parallel: s.parallel || 2,
+      theme: ['light', 'dark'].includes(s.theme) ? s.theme : 'system', parallel: s.parallel || 2, folder: s.folder || '',
       plNum: s.numberPlaylist !== false, keep: s.keepExtras !== false, clipKind: ['mp4', 'fast', 'audio'].includes(s.clipKind) ? s.clipKind : 'mp4',
     });
     // Drop selections / playback of items that are gone
@@ -142,6 +146,7 @@ class App extends Component {
     const s = this.state, q = s.q.trim().toLowerCase(), { groupOf } = this.groups();
     return this.lib
       .filter(it => (s.view !== 'audio' || it.audio) && (!s.channel || groupOf(it) === s.channel) &&
+        (s.folderFilter == null || (s.folderFilter === '' ? !it.folder : (it.folder === s.folderFilter || (it.folder || '').startsWith(s.folderFilter + '\\')))) &&
         (!q || (it.name + ' ' + it.title + ' ' + it.channel).toLowerCase().includes(q)))
       .slice().sort(SORTS[s.sort] || SORTS.newest);
   }
@@ -351,7 +356,7 @@ class App extends Component {
     }, 450);
   }
 
-  opts() { const s = this.state; return { saveAs: s.saveAs, quality: s.quality, audioFmt: s.audioFmt }; }
+  opts() { const s = this.state; return { saveAs: s.saveAs, quality: s.quality, audioFmt: s.audioFmt, folder: s.folder }; }
 
   async enqueueUrls(urls, extra = {}) {
     const n = await this.run('enqueue', { ...this.opts(), items: urls.map(url => ({ url })), ...extra });
@@ -372,8 +377,8 @@ class App extends Component {
     if (k.kind === 'playlist') this.openPlaylist(k.urls[0], []);
   }
 
-  async openPlaylist(url, rest) {
-    this.setState({ dlg: 'playlist', pl: { loading: true, url, items: [] }, pendingPlaylists: rest });
+  async openPlaylist(url, rest, folder) {
+    this.setState({ dlg: 'playlist', pl: { loading: true, url, items: [] }, pendingPlaylists: rest, plFolder: folder ?? this.state.folder });
     try {
       const p = await call('playlist', { url });
       this.setState({ pl: { ...p, url, items: p.items.map(x => ({ ...x, checked: !x.note })) } });
@@ -399,6 +404,7 @@ class App extends Component {
     if (patch.quality) m.quality = patch.quality;
     if (patch.audioFmt) m.audioFmt = patch.audioFmt;
     if (patch.pattern) m.pattern = patch.pattern;
+    if ('folder' in patch) m.folder = patch.folder;
     this.saveSetting(m);
   }
 
@@ -472,13 +478,88 @@ class App extends Component {
     } catch (e) { this.fail(e); }
   }
 
+  async copyAlert(text) {
+    await this.copy(text, 'Error');
+    // the alert isn't a "dlg", so confirm on its own button
+    clearTimeout(this.alertTimer); this.setState({ alertCopied: true });
+    this.alertTimer = setTimeout(() => this.setState({ alertCopied: false }), 1600);
+  }
+
+  /** "Music / Chill" -> "Music\\Chill" (display only; the host does the real clean-up). */
+  folderPreview(v) { return String(v || '').split(/[\\/]+/).map(x => x.trim()).filter(x => x && x !== '.' && x !== '..').join('\\'); }
+
+  /** A folder picker: free text (with existing folders suggested) plus a preview of where files will go. */
+  folderField(value, onChange, { label = 'Save to folder', tokens = true, id = 'folders' } = {}) {
+    const d = this.state.data, st = d.settings || {}, folders = d.folders || [];
+    const pv = this.folderPreview(value);
+    const lib = (st.libraryShort || 'Library').replace(/[\\/]+$/, '');
+    return html`
+      <div class="field"><label>${label}</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input class="input" style="flex:1;min-width:0" list=${id} value=${value} spellcheck="false"
+            onInput=${e => onChange(e.target.value)} placeholder=${tokens ? 'Library folder — or e.g. Music / Chill, {channel}, {year}' : 'Library folder — or e.g. Music / Chill'} />
+          <datalist id=${id}>${folders.map(f => html`<option value=${f}></option>`)}</datalist>
+          ${tokens && html`<button class="btn btn-ghost" style="font-size:12px" title="One folder per channel" onClick=${e => { e.preventDefault(); onChange(value && !/\{channel\}/i.test(value) ? this.folderPreview(value) + '\\{channel}' : '{channel}'); }}>+ {channel}</button>`}
+          ${value && html`<button class="btn btn-ghost btn-icon" title="Save in the library folder itself" style="width:28px;height:28px;color:var(--color-text)" onClick=${e => { e.preventDefault(); onChange(''); }}>${Icon.x()}</button>`}
+        </div>
+        <div class="text-muted" style="font-size:11.5px;margin-top:3px;display:flex;gap:4px;align-items:center;min-width:0">
+          ${Icon.folder(12)}<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${lib}${pv ? '\\' + pv : ''}</span>
+          ${tokens && /\{\w+\}/.test(value) && html`<span style="white-space:nowrap">— tokens are filled in for each video</span>`}
+        </div>
+      </div>`;
+  }
+
+  openMove(ids) {
+    const items = ids.map(id => this.item(id)).filter(Boolean);
+    if (!items.length) return;
+    const same = items.every(x => (x.folder || '') === (items[0].folder || ''));
+    this.setState({ dlg: 'move', moveIds: items.map(x => x.id), moveVal: same ? items[0].folder || '' : '', menu: null });
+  }
+
+  async applyMove() {
+    const s = this.state;
+    this.setState({ dlgBusy: true });
+    try {
+      const n = await call('moveEntries', { ids: s.moveIds, folder: s.moveVal });
+      const where = this.folderPreview(s.moveVal) || 'the library folder';
+      this.setState({ dlg: null, dlgBusy: false });
+      this.toast(n ? 'Moved ' + (n === 1 ? '1 item' : n + ' items') + ' to ' + where : 'Already in ' + where);
+    } catch (e) { this.fail(e); }
+  }
+
+  openJobError(id) { this.setState({ dlg: 'jobErr', errJobId: id, menu: null }); }
+  openSignIn() { this.setState({ dlg: 'signin', menu: null }); }
+
+  async setSignIn(source) {
+    try { await call('signIn', { source }); this.afterSignInChange(); }
+    catch (e) { this.fail(e); }
+  }
+
+  /** A pasted link that failed for lack of sign-in: read it again with the new setting. */
+  afterSignInChange() {
+    const s = this.state;
+    if (s.fetchErr && SIGN_IN_ERR.test(s.fetchErr)) this.setPaste(s.paste);
+  }
+
+  async pickCookieFile() {
+    try { const f = await call('pickCookieFile'); if (f) { this.toast('Using cookies file: ' + f.split('\\').pop()); this.afterSignInChange(); } }
+    catch (e) { this.fail(e); }
+  }
+
+  signInLabel() {
+    const st = this.state.data.settings || {}, src = st.cookieSource || '';
+    if (!src) return 'Off';
+    if (src === 'file') return 'cookies file';
+    return src[0].toUpperCase() + src.slice(1);
+  }
+
   openInfo(id) { if (this.item(id)) this.setState({ dlg: 'info', infoId: id, menu: null }); }
 
   /** Everything worth knowing about an item, as plain text (for "Copy details"). */
   detailsText(it) {
     const line = (k, v) => v ? k + ': ' + v + '\n' : '';
     return line('Name', it.name) + (it.title !== it.name ? line('Title', it.title) : '') + line('Channel', it.channel) +
-      line('Link', it.url) + line('Video ID', it.id) + line('Uploaded', it.uploaded) + line('Views', it.views ? it.views.toLocaleString() : '') +
+      line('Folder', it.folder || '') + line('Link', it.url) + line('Video ID', it.id) + line('Uploaded', it.uploaded) + line('Views', it.views ? it.views.toLocaleString() : '') +
       line('Length', fmt(it.len)) + line('Type', it.type) + line('Quality', it.quality) + line('Resolution', it.width ? it.width + ' × ' + it.height : '') +
       line('Audio', it.audioLabel) + line('Size', fmtSize(it.size)) + line('Saved', it.saved) +
       line('Chapters', (it.chapters || []).length || '') + line('Sponsor segments', (it.sponsors || []).length || '') +
@@ -577,6 +658,10 @@ class App extends Component {
   renderSidebar() {
     const s = this.state, d = s.data, tools = d.tools || {}, st = d.settings || {};
     const { list, groupOf } = this.groups();
+    // Folders items are in, plus their parent folders (so nesting shows), sorted
+    const folderSet = new Set();
+    this.lib.forEach(x => { let f = x.folder || ''; while (f) { folderSet.add(f); f = f.includes('\\') ? f.slice(0, f.lastIndexOf('\\')) : ''; } });
+    const folderList = [...folderSet].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
     const qLeft = d.queue.filter(x => x.state === 'wait' || x.state === 'dl').length;
     const clips = this.lib.reduce((n, x) => n + x.files.filter(f => f.role === 'clip').length, 0);
     const nav = (v, label, icon, count) => html`
@@ -592,6 +677,19 @@ class App extends Component {
         ${nav('queue', 'Queue', Icon.download(), qLeft || '')}
         ${nav('clips', 'Clips', Icon.scissors(), clips || '')}
         ${nav('audio', 'Audio files', Icon.music(), this.lib.filter(x => x.audio).length || '')}
+        ${folderList.length > 0 && html`
+          <h6 style="margin:22px 8px 6px" class="text-muted">Folders</h6>
+          <div style="overflow:auto;min-height:0;flex:0 1 auto;max-height:30vh">
+            ${[['', 'Library folder'], ...folderList.map(f => [f, f])].map(([f, label]) => {
+              const depth = f ? f.split('\\').length - 1 : 0;
+              const count = this.lib.filter(x => f === '' ? !x.folder : (x.folder === f || (x.folder || '').startsWith(f + '\\'))).length;
+              return html`
+                <div class=${'ch-item' + (s.folderFilter === f ? ' on' : '')} title=${f || 'Items not in a subfolder'} style=${'padding-left:' + (8 + depth * 12) + 'px'}
+                  onClick=${() => this.setState({ folderFilter: s.folderFilter === f ? null : f, view: s.view === 'audio' ? 'audio' : 'library', playerOpen: false })}>
+                  <span style="display:flex;gap:6px;align-items:center;min-width:0">${Icon.folder(12)}<span style="overflow:hidden;text-overflow:ellipsis">${f ? f.split('\\').pop() : label}</span></span>
+                  <span class="text-muted" style="margin-left:auto">${count}</span></div>`;
+            })}
+          </div>`}
         ${list.length > 0 && html`<h6 style="margin:22px 8px 6px" class="text-muted">Channels</h6>`}
         <div style="overflow:auto;min-height:0;flex:0 1 auto">
           ${list.map(g => html`
@@ -606,6 +704,7 @@ class App extends Component {
           </div>
           <a class="text-muted" style="text-decoration:none;word-break:break-all" title=${'Open ' + (st.libraryFolder || '')} onClick=${() => call('openLibraryFolder')}>${st.libraryShort || ''}</a>
           <a onClick=${async () => { const p = await call('changeFolder').catch(e => this.fail(e)); if (p) this.toast('Library folder: ' + p); }}>Change folder…</a>
+          <a onClick=${() => this.openSignIn()} title="Sign-in for age-restricted and members-only videos">Sign-in: ${this.signInLabel()}</a>
           <span class="text-muted" style="margin-top:6px">${tools.ready ? 'yt-dlp ' + (tools.ytdlp || '') + ' · ffmpeg ' + (tools.ffmpeg ? '✓' : '✗') + (tools.js ? ' · ' + tools.js : '') : tools.error ? 'Tools unavailable' : 'Preparing tools…'}</span>
           ${tools.error && html`<span class="err" style="font-size:11px">${tools.error}</span>`}
           ${tools.ready && html`<a onClick=${async () => { this.toast('Checking for yt-dlp updates…'); const r = await call('updateYtdlp').catch(e => this.fail(e)); if (r) this.toast(r); }}>Update yt-dlp</a>`}
@@ -630,14 +729,19 @@ class App extends Component {
             style="flex:1;min-width:0;border:0;background:transparent;font:inherit;font-size:15px;color:var(--color-text);outline:none;padding:6px 0" />
           ${pasteChip && html`<span class="tag tag-accent" style="white-space:nowrap;flex:none">${pasteChip}</span>`}
           ${k.kind === 'single' && k.inList && html`<button class="btn btn-ghost" style="font-size:13px" title="This video is part of a playlist" onClick=${() => this.openPlaylist('https://www.youtube.com/playlist?list=' + listIdOf(k.urls[0]), [])}>Whole playlist</button>`}
-          <button class="btn btn-ghost" style="font-size:13px" onClick=${() => this.setState({ dlg: 'multi', multiText: k.kind === 'multi' ? k.urls.join('\n') : '' })}>Multiple links</button>
+          <button class="btn btn-ghost" style="font-size:13px" onClick=${() => this.setState({ dlg: 'multi', multiText: k.kind === 'multi' ? k.urls.join('\n') : '', batchFolder: s.folder })}>Multiple links</button>
           <button class="btn btn-ghost" style="font-size:13px" onClick=${() => this.setState({ optsOpen: !s.optsOpen })}>${s.optsOpen ? 'Options ▴' : 'Options ▾'}</button>
           <button class="btn btn-primary" style="height:36px;padding-inline:18px" onClick=${() => this.doPrimary()} disabled=${primaryDisabled}>${primaryLabel}</button>
         </div>
         ${!s.paste && !s.optsOpen && this.lib.length === 0 && s.loaded && html`
           <div class="text-muted" style="font-size:12.5px">Paste a video, a playlist or several links above. Everything you download lands in your library.</div>`}
         ${s.fetching && html`<div style="display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--color-accent-700)">Fetching video info…<div class="indeterminate"><div></div></div></div>`}
-        ${s.fetchErr && html`<div class="err" style="font-size:12.5px">Couldn't read that link: ${s.fetchErr.split('\n').pop()}</div>`}
+        ${s.fetchErr && html`<div style="font-size:12.5px;display:flex;gap:12px;align-items:baseline;flex-wrap:wrap">
+          <span class="err">Couldn't read that link: ${SIGN_IN_ERR.test(s.fetchErr) ? (/age/i.test(s.fetchErr) ? 'it\'s age-restricted and needs a signed-in account.' : 'it needs a signed-in account.') : s.fetchErr.split('\n').pop()}</span>
+          ${SIGN_IN_ERR.test(s.fetchErr) && html`<a onClick=${() => this.openSignIn()}>Set up sign-in…</a>`}
+          <a onClick=${() => this.copyAlert(s.paste + '\n\n' + s.fetchErr)}>${s.alertCopied ? 'Copied ✓' : 'Copy error'}</a>
+          ${SIGN_IN_ERR.test(s.fetchErr) && (s.data.settings || {}).cookieSource && html`<a onClick=${() => this.setPaste(s.paste)}>Try again</a>`}
+        </div>`}
         ${s.optsOpen && html`
           <div class="blueprint" style=${'display:grid;grid-template-columns:' + (f ? '240px minmax(0,1fr)' : 'minmax(0,1fr)') + ';gap:16px;padding:14px'}>
             <${Corners} />
@@ -661,6 +765,7 @@ class App extends Component {
                   </select>
                 </div>
               </div>
+              ${this.folderField(s.folder, v => this.setDefaults({ folder: v }), { id: 'folders-opts' })}
               <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
                 <div class="field"><label>Save as</label><div class="seg">${seg('video', 'Video')}${seg('audio', 'Audio only')}${seg('va', 'Video + audio file')}</div></div>
                 <div class="field"><label>Quality</label>
@@ -738,6 +843,7 @@ class App extends Component {
           ${ab('Save audio', () => this.saveAudio(s.sel))}
           ${ab(multi ? '⟳ Re-download ' + s.sel.length : '⟳ Re-download', () => this.redl(s.sel))}
           ${ab('…with settings', () => this.openRedl(s.sel))}
+          ${ab('Move…', () => this.openMove(s.sel))}
           ${ab('Show in folder', () => this.showInFolder(s.sel[0]), { disabled: multi })}
           ${ab('Delete', () => this.setState({ dlg: 'del' }))}
           <span style="margin-left:auto;font-size:12px">Shift / Ctrl-click to select more · right-click for menu</span>
@@ -759,7 +865,8 @@ class App extends Component {
             <div style="display:flex;flex-direction:column;gap:4px"><div style="display:flex;gap:8px;font-size:13px"><span style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title=${qActive.detail}>${qActive.title}</span><span style="margin-left:auto;font-variant-numeric:tabular-nums;white-space:nowrap" class="text-muted">${Math.floor(qActive.pct)}%</span></div>
               <div class="bar"><div style=${'width:' + pct(qActive.pct / 100)}></div></div></div>`)}
           <div style="display:flex;font-size:12.5px;gap:8px" class="text-muted"><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${qWait ? 'Next: ' + q.find(x => x.state === 'wait').title : 'Nothing waiting'}</span>
-            ${qFail > 0 && html`<a style="margin-left:auto;white-space:nowrap" onClick=${() => call('queueRetry', {})}>${qFail} failed — retry</a>`}</div>
+            ${qFail > 0 && q.some(x => x.state === 'fail' && x.signIn) && !(d.settings || {}).cookieSource && html`<a style="margin-left:auto;white-space:nowrap" onClick=${() => this.openSignIn()}>Needs sign-in</a>`}
+            ${qFail > 0 && html`<a style=${'white-space:nowrap' + (q.some(x => x.state === 'fail' && x.signIn) && !(d.settings || {}).cookieSource ? '' : ';margin-left:auto')} onClick=${() => call('queueRetry', {})}>${qFail} failed — retry</a>`}</div>
         </div>`}`;
   }
 
@@ -779,7 +886,7 @@ class App extends Component {
       done: ['Done', 'tag-neutral'], skip: ['Skipped', 'tag-neutral'], dl: ['Downloading', 'tag-accent'],
       wait: [d.queuePaused ? 'Paused' : 'Waiting', 'tag-outline'], fail: ['Failed', 'tag-accent'],
     };
-    const cols = 'grid-template-columns:36px minmax(0,1fr) 210px 260px 110px';
+    const cols = 'grid-template-columns:36px minmax(0,1fr) 190px 300px 150px';
     return html`
       <div style="flex:none;padding:8px 28px 12px;display:flex;align-items:center;gap:10px">
         <h3 style="margin:0">Queue</h3><span class="text-muted" style="font-size:13px">${this.qSummary()}</span>
@@ -804,12 +911,15 @@ class App extends Component {
             <div class="qrow" onDblClick=${() => playable && this.play(x.resultId, true)} style=${'display:grid;' + cols + ';align-items:center;padding:10px 8px;font-size:13px;border-bottom:1px solid color-mix(in srgb,var(--color-text) 7%,transparent)'}>
               <span class="text-muted" style="font-variant-numeric:tabular-nums">${i + 1}</span>
               <span style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:12px" title=${x.title}>${x.title}</span>
-              <span class="text-muted" style="font-size:12px">${x.opts}</span>
+              <span class="text-muted" style="font-size:12px">${x.opts}${x.folder ? html`<br />${Icon.folder(11)} ${x.folder.replace(/\\/g, ' › ')}` : ''}</span>
               <div style="display:flex;flex-direction:column;gap:5px;padding-right:16px;min-width:0">
-                <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title=${x.detail}><span class=${'tag ' + cls}>${label}</span><span class="text-muted" style="font-size:12px;margin-left:8px">${x.state === 'wait' && x.detail === 'Paused' ? '' : x.detail}</span></span>
+                <span style=${'white-space:nowrap;overflow:hidden;text-overflow:ellipsis' + (x.state === 'fail' ? ';cursor:pointer' : '')} title=${x.state === 'fail' ? 'Show the full error' : x.detail}
+                  onClick=${() => x.state === 'fail' && this.openJobError(x.id)}><span class=${'tag ' + cls}>${label}</span><span class=${x.state === 'fail' ? 'err' : 'text-muted'} style="font-size:12px;margin-left:8px">${x.state === 'wait' && x.detail === 'Paused' ? '' : x.detail}</span></span>
+                ${x.state === 'fail' && x.signIn && html`<a style="font-size:12px" onClick=${() => this.openSignIn()}>Set up sign-in…</a>`}
                 ${x.state === 'dl' && html`<div class="bar"><div style=${'width:' + pct(x.pct / 100)}></div></div>`}
               </div>
               <div style="display:flex;gap:4px;justify-content:flex-end">
+                ${x.state === 'fail' && html`<button class="btn btn-ghost" style="font-size:12px" onClick=${() => this.openJobError(x.id)}>Error</button>`}
                 ${x.state === 'fail' && html`<button class="btn btn-ghost" style="font-size:12px" onClick=${() => call('queueRetry', { id: x.id })}>Retry</button>`}
                 ${playable && html`<button class="btn btn-ghost" style="font-size:12px" onClick=${() => this.play(x.resultId, true)}>Play</button>`}
                 <button class="btn btn-ghost btn-icon" title=${x.state === 'dl' ? 'Cancel and remove' : 'Remove'} style="width:28px;height:28px;color:var(--color-text)" onClick=${() => call('queueRemove', { id: x.id })}>${Icon.x()}</button>
@@ -1006,6 +1116,7 @@ class App extends Component {
       { label: 'Play', key: 'Enter', on: () => this.play(m, true), dis: n > 1 },
       { label: 'Play in mini player', on: () => this.play(m, false), dis: n > 1 },
       { label: 'Rename…', key: 'F2', on: () => this.openRename(m), sep: true, dis: n > 1 },
+      { label: n > 1 ? 'Move ' + n + ' items to folder…' : 'Move to folder…', on: () => this.openMove(ids) },
       { label: n > 1 ? 'Save audio for ' + n + ' items' : 'Save audio', on: () => this.saveAudio(ids) },
       { label: n > 1 ? '⟳ Re-download ' + n + ' items' : '⟳ Re-download', on: () => this.redl(ids), sep: true },
       { label: '⟳ Re-download with settings…', on: () => this.openRedl(ids) },
@@ -1036,10 +1147,94 @@ class App extends Component {
           <div class="dialog-title">Something went wrong</div>
           <pre class="selectable" style="margin:0;white-space:pre-wrap;font:12.5px/1.5 ui-monospace,Menlo,monospace;max-height:50vh;overflow:auto">${s.alert}</pre>
           <div class="dialog-body" style="font-size:12.5px">If downloads keep failing after a YouTube change, try "Update yt-dlp" in the sidebar.</div>
-          <div class="dialog-actions"><button class="btn btn-primary" onClick=${() => this.setState({ alert: null })}>OK</button></div>
+          <div class="dialog-actions"><button class="btn btn-secondary" style="margin-right:auto" onClick=${() => this.copyAlert(s.alert)}>${s.alertCopied ? 'Copied ✓' : 'Copy error'}</button><button class="btn btn-primary" onClick=${() => this.setState({ alert: null })}>OK</button></div>
         </div></div>`;
 
     switch (s.dlg) {
+      case 'move': {
+        const items = s.moveIds.map(id => this.item(id)).filter(Boolean);
+        if (!items.length) return null;
+        const folders = s.data.folders || [];
+        const target = this.folderPreview(s.moveVal);
+        const row = (val, label, count) => html`
+          <div class=${'menu-item' + (target.toLowerCase() === val.toLowerCase() ? ' on' : '')} style=${'gap:8px;padding:6px 8px' + (target.toLowerCase() === val.toLowerCase() ? ';background:var(--color-accent-100);color:var(--color-accent-800)' : '')}
+            onClick=${() => this.setState({ moveVal: val })} onDblClick=${() => { this.setState({ moveVal: val }, () => this.applyMove()); }}>
+            ${Icon.folder(13)}<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${label}</span>
+            <span class="text-muted" style="margin-left:auto;font-size:12px">${count || ''}</span></div>`;
+        const countIn = f => this.lib.filter(x => (x.folder || '') === f).length;
+        const from = [...new Set(items.map(x => x.folder || ''))];
+        return shell(html`
+          <div><div class="card-kicker">MOVE</div>
+            <div class="dialog-title" style="word-break:break-word">${items.length > 1 ? 'Move ' + items.length + ' items' : 'Move “' + items[0].name + '”'}</div>
+            <div class="text-muted" style="font-size:12px;margin-top:2px">Currently in: ${from.map(f => f || 'the library folder').join(', ')}</div></div>
+          ${this.folderField(s.moveVal, v => this.setState({ moveVal: v }), { label: 'Move to folder', id: 'folders-move' })}
+          <div class="dialog-scroll" style="display:flex;flex-direction:column;border-top:1px solid var(--color-divider);border-bottom:1px solid var(--color-divider);font-size:13px">
+            ${row('', 'Library folder (no subfolder)', countIn(''))}
+            ${folders.map(f => row(f, f.replace(/\\/g, ' › '), countIn(f)))}
+          </div>
+          <div class="dialog-body" style="font-size:12.5px">Every file of ${items.length > 1 ? 'each item' : 'the item'} moves — video, audio files, clips and thumbnail. New folders are created as needed; if a name is taken there, the item becomes “Name (2)”.</div>
+          <div class="dialog-actions"><button class="btn btn-ghost" onClick=${close}>Cancel</button>
+            <button class="btn btn-primary" disabled=${s.dlgBusy} onClick=${() => this.applyMove()}>${s.dlgBusy ? 'Moving…' : 'Move'}</button></div>`, 520);
+      }
+      case 'jobErr': {
+        const j = s.data.queue.find(x => x.id === s.errJobId);
+        if (!j) return null;
+        const full = j.error || j.detail || 'Failed';
+        const report = j.title + '\n' + (j.url || '') + '\n\n' + full;
+        return shell(html`
+          <div><div class="card-kicker">DOWNLOAD FAILED</div><div class="dialog-title" style="word-break:break-word">${j.title}</div>
+            ${j.url && html`<div class="text-muted selectable" style="font-size:12px;word-break:break-all;margin-top:2px">${j.url}</div>`}</div>
+          <div style="font-size:13.5px;font-weight:500">${j.detail}</div>
+          ${j.signIn && html`
+            <div style="background:var(--color-accent-100);color:var(--color-accent-800);padding:10px 12px;font-size:12.5px;line-height:1.45">
+              This video only plays for a signed-in account (for example, it's age-restricted). Set up <b>Sign-in</b> to let
+              ReelKeep use the account you're signed into in your browser, or a cookies file, then retry.
+              <div style="margin-top:8px"><button class="btn btn-primary" style="font-size:12.5px" onClick=${() => this.openSignIn()}>Set up sign-in…</button></div>
+            </div>`}
+          <div class="dialog-scroll" style="min-height:60px"><pre class="selectable" style="margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.5 ui-monospace,Menlo,monospace;padding:10px;background:var(--color-surface);border:1px solid var(--color-divider)">${full}</pre></div>
+          <div class="dialog-actions">
+            <button class="btn btn-secondary" style="margin-right:auto" onClick=${() => this.copy(report, 'Error')}>${s.copied === 'Error' ? 'Copied ✓' : 'Copy error'}</button>
+            <button class="btn btn-ghost" onClick=${() => { close(); call('queueRetry', { id: j.id }); }}>Retry</button>
+            <button class="btn btn-primary" onClick=${close}>Close</button>
+          </div>`, 600);
+      }
+      case 'signin': {
+        const st = s.data.settings || {}, src = st.cookieSource || '';
+        const browsers = st.signInBrowsers || ['firefox', 'chrome', 'edge', 'brave', 'opera', 'vivaldi'];
+        const isBrowser = src && src !== 'file';
+        const failedSignIn = s.data.queue.filter(x => x.state === 'fail' && x.signIn).length;
+        const opt = (on, onPick, title, body) => html`
+          <label class="radio" style="align-items:flex-start;gap:10px;font-size:13px;cursor:pointer;padding:8px 0;border-bottom:1px solid color-mix(in srgb,var(--color-text) 7%,transparent)">
+            <input type="radio" name="signin" checked=${on} onChange=${onPick} /><span class="dot" style="margin-top:2px"></span>
+            <div style="flex:1;min-width:0"><div style="font-weight:500">${title}</div><div class="text-muted" style="font-size:12px;line-height:1.45;margin-top:2px">${body}</div></div>
+          </label>`;
+        const cap = b => b[0].toUpperCase() + b.slice(1);
+        return shell(html`
+          <div><div class="card-kicker">SIGN-IN</div><div class="dialog-title">Sign-in for restricted videos</div></div>
+          <div class="dialog-body" style="font-size:13px;line-height:1.5">Some videos — age-restricted or members-only ones — only play for a signed-in account.
+            ReelKeep can let yt-dlp use the account you're already signed into in a browser, or a cookies file you export.</div>
+          <div class="dialog-scroll" style="display:flex;flex-direction:column">
+            ${opt(!src, () => this.setSignIn(''), 'Off', 'Download as a visitor (default).')}
+            ${opt(isBrowser, () => this.setSignIn(isBrowser ? src : 'firefox'), html`Use my browser's sign-in
+                <select class="input" style="margin-left:8px;min-height:28px;padding:2px 6px;font-size:12.5px;width:auto;display:inline-block" value=${isBrowser ? src : 'firefox'}
+                  onClick=${e => e.stopPropagation()} onChange=${e => this.setSignIn(e.target.value)}>
+                  ${browsers.map(b => html`<option value=${b}>${cap(b)}</option>`)}
+                </select>`,
+              html`Sign in to the video site in that browser first. <b>Firefox works best.</b> Chrome-based browsers (Chrome, Edge, Brave…) must be fully closed while downloading, and recent versions encrypt their sign-in so it often can't be read — if that happens, use Firefox or a cookies file.`)}
+            ${opt(src === 'file', () => st.cookieFile ? this.setSignIn('file') : this.pickCookieFile(), 'Use a cookies file',
+              html`A <code>cookies.txt</code> (Netscape format) exported from your browser while signed in, using a "cookies.txt" export extension.
+                <div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                  <button class="btn btn-secondary" style="font-size:12px" onClick=${e => { e.preventDefault(); this.pickCookieFile(); }}>${st.cookieFile ? 'Choose another…' : 'Choose file…'}</button>
+                  ${st.cookieFile && html`<span class="selectable" style="font-size:12px;word-break:break-all">${st.cookieFile}</span>`}
+                </div>`)}
+          </div>
+          <div class="text-muted" style="font-size:11.5px;line-height:1.45">Your sign-in stays on this PC and is only sent to the video site. Keep cookies files private — they work like a password.
+            Use an account that's allowed to watch the video (age-restricted videos need an adult account), and only for content you have the right to keep.</div>
+          <div class="dialog-actions">
+            ${failedSignIn > 0 && html`<button class="btn btn-secondary" style="margin-right:auto" disabled=${!src} onClick=${() => { close(); call('queueRetry', {}); this.toast('Retrying failed downloads'); }}>Retry ${failedSignIn} failed</button>`}
+            <button class="btn btn-primary" onClick=${close}>Done</button>
+          </div>`, 560);
+      }
       case 'info': {
         const it = this.item(s.infoId);
         if (!it) return null;
@@ -1061,6 +1256,7 @@ class App extends Component {
             </div>
             <div style="display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 14px;font-size:13px">
               ${it.title !== it.name && html`<span class="text-muted">Original title</span><span class="selectable">${it.title}</span>`}
+              <span class="text-muted">Folder</span><span>${it.folder ? it.folder.replace(/\\/g, ' › ') : 'Library folder'} <a style="margin-left:6px;font-size:12px" onClick=${() => this.openMove([it.id])}>Move…</a></span>
               <span class="text-muted">Link</span><a style="word-break:break-all" onClick=${() => call('openUrl', { url: it.url })}>${it.url}</a>
               <span class="text-muted">Video ID</span><span class="selectable" style="font-family:ui-monospace,Menlo,monospace;font-size:12.5px">${it.id}</span>
             </div>
@@ -1119,13 +1315,14 @@ class App extends Component {
         return shell(html`
           <div class="dialog-title">Multiple links</div>
           <textarea class="input" style="min-height:170px;font-size:13px" spellcheck="false" value=${s.multiText} onInput=${e => this.setState({ multiText: e.target.value })} placeholder="One link per line, or separated by spaces / commas"></textarea>
+          ${this.folderField(s.batchFolder, v => this.setState({ batchFolder: v }), { id: 'folders-multi' })}
           <div class="dialog-body" style="font-size:12.5px">${urls.length} ${urls.length === 1 ? 'link' : 'links'}${lists ? ' (' + lists + ' playlist' + (lists > 1 ? 's' : '') + ' — you pick videos next)' : ''} — queued with the current Save-as, quality and audio format.</div>
           <div class="dialog-actions"><button class="btn btn-ghost" onClick=${close}>Cancel</button>
             <button class="btn btn-primary" disabled=${!urls.length} onClick=${async () => {
               const singles = urls.filter(u => linkKind(u).kind !== 'playlist'), pls = urls.filter(u => linkKind(u).kind === 'playlist');
               this.setState({ dlg: null, paste: '' });
-              if (singles.length) await this.enqueueUrls(singles).catch(() => {});
-              if (pls.length) this.openPlaylist(pls[0], pls.slice(1));
+              if (singles.length) await this.enqueueUrls(singles, { folder: s.batchFolder }).catch(() => {});
+              if (pls.length) this.openPlaylist(pls[0], pls.slice(1), s.batchFolder);
             }}>Add to queue</button></div>`, 520);
       }
       case 'playlist': {
@@ -1150,11 +1347,16 @@ class App extends Component {
                     </label>`)}
                 </div>
                 <label class="radio" style="font-size:13px" onClick=${e => { e.preventDefault(); this.setState({ plNum: !s.plNum }); this.saveSetting({ numberPlaylist: !s.plNum }); }}><span class="dot" style=${'border-radius:0;border-color:var(--color-accent);background:' + (s.plNum ? 'var(--color-accent)' : 'transparent')}></span>Number files by playlist position (${pl.items[0] ? pl.items[0].n : '01'} - Title)</label>`}
+              ${!pl.loading && html`
+                <div style="display:flex;flex-direction:column;gap:2px">
+                  ${this.folderField(s.plFolder, v => this.setState({ plFolder: v }), { id: 'folders-pl' })}
+                  ${pl.title && html`<a style="font-size:12px;align-self:flex-start" onClick=${() => this.setState({ plFolder: pl.title.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim() })}>Use the playlist name as the folder</a>`}
+                </div>`}
               <div class="dialog-actions"><button class="btn btn-ghost" onClick=${() => { close(); next(); }}>Cancel</button>
                 <button class="btn btn-primary" disabled=${pl.loading || !checked.length} onClick=${async () => {
                   this.setState({ dlg: null, paste: '' });
                   try {
-                    const n = await call('enqueue', { ...this.opts(), items: checked.map(p => ({ url: p.url, id: p.id, title: p.title, prefix: s.plNum ? p.n + ' - ' : null })) });
+                    const n = await call('enqueue', { ...this.opts(), folder: s.plFolder, items: checked.map(p => ({ url: p.url, id: p.id, title: p.title, prefix: s.plNum ? p.n + ' - ' : null })) });
                     this.toast(n + (n === 1 ? ' video' : ' videos') + ' added to the queue');
                   } catch (e) { this.fail(e); }
                   next();

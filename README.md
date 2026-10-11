@@ -31,15 +31,19 @@ so months later you still know exactly where each one came from.
 - **Download queue** with up to 6 at a time, pause / resume and retry.
 - **Save as video, audio, or both** — audio as M4A, MP3, FLAC or WAV, tagged with title, creator and cover art.
 - **Library** with search, sort, grid / list views, multi-select and a right-click menu.
+- **Subfolders** — choose a folder for new downloads (`Music / Chill`, or `{channel}` for one folder per creator),
+  name a playlist's folder after the playlist, and **Move to folder…** existing items; browse by folder in the sidebar.
 - **Built-in player** with chapters, a mini player that keeps playing while you browse, and theater mode.
 - **Clips** — mark a start and end, preview, and save as MP4 or audio.
 - **Details panel** (right-click › Details… or Alt+Enter) with *Copy details* for your records.
 - **Re-download** an item at a different quality without losing your clips or audio files.
 - **Rename** (every related file follows), **delete to the Recycle Bin**, **show in folder**.
+- **Sign-in for restricted videos** — use your browser's sign-in or a cookies file for age-restricted or members-only content.
+- **Clear errors** — failed downloads explain what went wrong, and *Copy error* gives you the full text.
 - **Light, dark or follow-Windows theme.**
 
-Everything stays on your PC: one folder of normal media files you can open with any player, plus a small hidden
-`.library` folder holding the details.
+Everything stays on your PC: normal media files you can open with any player — in the library folder or the
+subfolders you choose — plus a small hidden `.library` folder holding the details.
 
 ## Getting started
 
@@ -47,6 +51,27 @@ Everything stays on your PC: one folder of normal media files you can open with 
 2. Run it. On first start it fetches the open-source tools it needs, [yt-dlp](https://github.com/yt-dlp/yt-dlp) and
    [FFmpeg](https://ffmpeg.org), into `%LOCALAPPDATA%\ReelKeep\tools` (ffmpeg is about 140 MB, downloaded once).
 3. Paste a link to your video. Files are saved to `Videos\ReelKeep`; you can change this at the bottom of the sidebar.
+
+### Folders
+
+Open **Options** next to the link box and set **Save to folder** — for example `Music / Chill` — and new downloads go
+into that subfolder of your library. Folder names can use the same tokens as file names (`{channel}`, `{year}`, …), so
+`{channel}` gives every creator their own folder. *Multiple links* and the playlist picker have the same field, and the
+playlist picker can use the playlist's name.
+
+To reorganise later, select items, right-click and choose **Move to folder…**. Every file of the item moves — video,
+audio files, clips and thumbnail — and folders left empty are tidied away.
+
+### Restricted videos
+
+Some videos — age-restricted or members-only ones — only play for a signed-in account. If a download fails with
+*"needs sign-in"*, click **Sign-in** at the bottom of the sidebar and choose either:
+
+- **Use my browser's sign-in** — sign in to the site in that browser first. Firefox works best; Chrome-based browsers
+  must be fully closed while downloading, and recent versions encrypt their sign-in so it often can't be read.
+- **Use a cookies file** — a `cookies.txt` (Netscape format) exported from your browser while signed in.
+
+Then press **Retry**. Your sign-in stays on your PC; keep cookies files private, as they work like a password.
 
 **Requirements:** Windows 10 or 11 (64-bit) with the Microsoft Edge WebView2 Runtime, which is already part of
 Windows 11 and up-to-date Windows 10.
@@ -92,6 +117,10 @@ src/ReelKeep/
 ReelKeep is meant for content you own or have the right to keep — your own uploads, material shared under an open
 licence, or anything the creator and the hosting service allow you to save. Please respect creators' copyright and
 each site's terms of service.
+
+## What's new
+
+See the [changelog](CHANGELOG.md) for what changed in each version.
 
 ## Licence
 
